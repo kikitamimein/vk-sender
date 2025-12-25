@@ -2,6 +2,7 @@ import flet as ft
 import asyncio
 import os
 import time
+import json
 from vk_logic import VKManager
 
 # Constants for styling - Cleaner, more stable palette
@@ -10,6 +11,7 @@ SURFACE_COLOR = "#1E1E1E"
 ACCENT_COLOR = "#007AFF"  # Classic Blue
 TEXT_COLOR = "#FFFFFF"
 SECONDARY_TEXT = "#B0B0B0"
+CONFIG_FILE = "config.json"
 
 class VKSenderApp:
     def __init__(self, page: ft.Page):
@@ -18,6 +20,9 @@ class VKSenderApp:
         self.setup_page()
         self.init_ui_components()
         self.build_layout()
+        
+        # Initialize API on startup
+        self.auto_init_api()
 
     def setup_page(self):
         self.page.title = " "
@@ -27,6 +32,40 @@ class VKSenderApp:
         self.page.window_width = 1000
         self.page.window_height = 750
         self.page.update()
+
+    def load_settings(self):
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Error loading config: {e}")
+        return {}
+
+    def save_settings(self, token, group_id):
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump({"vk_token": token, "vk_group_id": group_id}, f, ensure_ascii=False, indent=4)
+            return True
+        except Exception as e:
+            print(f"Error saving config: {e}")
+            return False
+
+    def auto_init_api(self):
+        settings = self.load_settings()
+        token = settings.get("vk_token")
+        group_id = settings.get("vk_group_id")
+        
+        if token and group_id:
+            try:
+                self.vk_manager = VKManager(token, int(group_id))
+                self.token_input.value = token
+                self.group_id_input.value = str(group_id)
+                self.log("API автоматически инициализировано из файла.")
+            except Exception as e:
+                self.log(f"Ошибка авто-инициализации: {e}")
+        else:
+            self.log("Настройки API не найдены. Пожалуйста, настройте их.")
 
     def init_ui_components(self):
         # File Picker
@@ -76,6 +115,13 @@ class VKSenderApp:
             icon=ft.Icons.UPLOAD_FILE,
             on_click=lambda _: self.file_picker.pick_files(),
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8))
+        )
+        self.clear_file_button = ft.IconButton(
+            icon=ft.Icons.CLOSE,
+            icon_color="#CF6679",
+            tooltip="Убрать файл",
+            visible=False,
+            on_click=self.reset_file
         )
 
         # Interval Settings
@@ -193,10 +239,14 @@ class VKSenderApp:
         main_content = ft.Container(
             content=ft.Column([
                 self.message_input,
+                # Local File Row (Now first)
                 ft.Row([
-                    ft.Column([self.attachment_input], expand=True),
-                    ft.Column([self.select_file_button, self.file_info_text], spacing=5)
-                ], spacing=15, vertical_alignment=ft.CrossAxisAlignment.START),
+                    self.select_file_button,
+                    self.file_info_text,
+                    self.clear_file_button
+                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                # VK Attachment Row
+                self.attachment_input,
                 ft.Row([self.start_button, self.stop_button], spacing=15),
                 ft.Column([
                     self.progress_text,
@@ -220,12 +270,19 @@ class VKSenderApp:
         self.page.add(
             ft.Row([sidebar, main_content], expand=True, spacing=20)
         )
-
+        
     def on_file_result(self, e: ft.FilePickerResultEvent):
         if e.files:
             self.selected_file_path = e.files[0].path
             self.file_info_text.value = f"Файл: {e.files[0].name}"
+            self.clear_file_button.visible = True
             self.page.update()
+
+    def reset_file(self, e):
+        self.selected_file_path = None
+        self.file_info_text.value = "Файл не выбран"
+        self.clear_file_button.visible = False
+        self.page.update()
 
     def on_filter_change(self, e):
         is_activity = (self.filter_dropdown.value == "activity")
@@ -235,22 +292,22 @@ class VKSenderApp:
 
     def show_settings(self, e):
         # Load current values into inputs
-        self.token_input.value = self.page.client_storage.get("vk_token") or ""
-        self.group_id_input.value = self.page.client_storage.get("vk_group_id") or ""
+        settings = self.load_settings()
+        self.token_input.value = settings.get("vk_token") or ""
+        self.group_id_input.value = str(settings.get("vk_group_id") or "")
 
-        def save_settings(e):
+        def save_settings_click(e):
             try:
                 token = self.token_input.value
                 group_id = int(self.group_id_input.value or 0)
                 
-                # Save to storage
-                self.page.client_storage.set("vk_token", token)
-                self.page.client_storage.set("vk_group_id", str(group_id))
-                
-                self.vk_manager = VKManager(token, group_id)
-                settings_dialog.open = False
-                self.log("Настройки API сохранены.")
-                self.page.update()
+                if self.save_settings(token, group_id):
+                    self.vk_manager = VKManager(token, group_id)
+                    settings_dialog.open = False
+                    self.log("Настройки API сохранены в файл.")
+                    self.page.update()
+                else:
+                    self.log("Ошибка при сохранении файла настроек.")
             except ValueError:
                 self.log("Ошибка: ID группы должен быть числом.")
 
@@ -261,7 +318,7 @@ class VKSenderApp:
                 self.group_id_input,
             ], tight=True, spacing=15),
             actions=[
-                ft.TextButton("Сохранить", on_click=save_settings),
+                ft.TextButton("Сохранить", on_click=save_settings_click),
                 ft.TextButton("Отмена", on_click=lambda _: self.close_dialog(settings_dialog))
             ]
         )
@@ -285,16 +342,6 @@ class VKSenderApp:
         self.page.update()
 
     async def start_mailing(self, e):
-        # Auto-initialize manager from storage if not already done
-        if not self.vk_manager:
-            token = self.page.client_storage.get("vk_token")
-            group_id = self.page.client_storage.get("vk_group_id")
-            if token and group_id:
-                try:
-                    self.vk_manager = VKManager(token, int(group_id))
-                except:
-                    pass
-
         if not self.vk_manager:
             self.log("Ошибка: Настройки API не заданы.")
             self.show_settings(None)
